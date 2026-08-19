@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Classic Snake</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: #0b1120; color: #e2e8f0;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  }
+  h1 { margin: 0 0 6px; letter-spacing: 4px; font-size: 26px; color: #4ade80; text-transform: uppercase; }
+  .hint { margin: 0 0 12px; font-size: 13px; color: #64748b; }
+  .hud { display: flex; justify-content: space-between; width: fit-content; margin-bottom: 10px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .hud span b { color: #4ade80; }
+  #game { position: relative; line-height: 0; }
+  canvas { background: #0f172a; border: 3px solid #334155; display: block; image-rendering: pixelated; }
+  .overlay {
+    position: absolute; inset: 3px; z-index: 2;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
+    background: rgba(11, 17, 32, .82); color: #e2e8f0; text-align: center; line-height: 1.4; padding: 12px;
+  }
+  .overlay h2 { margin: 0; font-size: 24px; letter-spacing: 2px; }
+  .overlay p { margin: 0; color: #94a3b8; font-size: 14px; white-space: pre-line; }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+  <h1>Snake</h1>
+  <p class="hint">Arrow keys to steer &middot; P to pause &middot; Space / Enter to start or restart</p>
+  <div class="hud" id="gameHud" style="width:406px;">
+    <span>Score <b id="score">0</b></span>
+    <span>Best <b id="high">0</b></span>
+    <span>Speed <b id="speed">1.0x</b></span>
+  </div>
+  <div id="game">
+    <canvas id="board" width="400" height="400"></canvas>
+    <div class="overlay hidden" id="msgBox"><h2 id="msgTitle"></h2><p id="msgText"></p></div>
+  </div>
+
+<script>
+(() => {
+'use strict';
+
+var COLS = 25, ROWS = 25, CELL = 16; // board is 400x400 px
+var BASE_DELAY = 140, MIN_DELAY = 60;
+
+var canvas = document.getElementById('board');
+var ctx = canvas.getContext('2d');
+var scoreEl = document.getElementById('score');
+var highEl = document.getElementById('high');
+var speedEl = document.getElementById('speed');
+var msgBox = document.getElementById('msgBox');
+var msgTitle = document.getElementById('msgTitle');
+var msgText = document.getElementById('msgText');
+
+function loadHigh() { try { return parseInt(localStorage.getItem('classic-snake-high') || '0', 10) || 0; } catch (e) { return 0; } }
+function saveHigh(v) { try { localStorage.setItem('classic-snake-high', String(v)); } catch (e) {} }
+
+var snake, dir, queue, food, score, high = loadHigh(), status = 'ready', won = false, timer = null;
+
+function currentDelay() { return Math.max(MIN_DELAY, BASE_DELAY - score * 1.5); }
+function speedFactor() { return +(BASE_DELAY / currentDelay()).toFixed(2) + 'x'; }
+
+function reset() {
+  snake = [{ x: 8, y: 12 }, { x: 7, y: 12 }, { x: 6, y: 12 }]; // head first, moving right
+  dir = { x: 1, y: 0 };
+  queue = [];
+  score = 0;
+  won = false;
+  food = null;
+  spawnFood();
+  updateHud();
+}
+
+function spawnFood() {
+  var empty = [];
+  for (var y = 0; y < ROWS; y++)
+    for (var x = 0; x < COLS; x++) {
+      var onSnake = false;
+      for (var i = 0; i < snake.length; i++) if (snake[i].x === x && snake[i].y === y) { onSnake = true; break; }
+      if (!onSnake) empty.push({ x: x, y: y });
+    }
+  food = empty.length ? empty[Math.floor(Math.random() * empty.length)] : null;
+}
+
+function updateHud() {
+  scoreEl.textContent = String(score);
+  highEl.textContent = String(high);
+  speedEl.textContent = status === 'ready' ? '1.0x' : speedFactor();
+}
+
+function showOverlay(title, text) {
+  msgTitle.textContent = title;
+  msgText.textContent = text || '';
+  msgBox.classList.remove('hidden');
+}
+function hideOverlay() { msgBox.classList.add('hidden'); }
+
+function die(reason) {
+  status = 'over';
+  stopTimer();
+  if (score > high) { high = score; saveHigh(high); updateHud(); }
+  showOverlay('Game Over', reason === 'wall' ? 'You crashed into the wall!' : 'You bit your tail!');
+}
+
+function win() {
+  status = 'over';
+  won = true;
+  stopTimer();
+  if (score > high) { high = score; saveHigh(high); updateHud(); }
+  showOverlay('YOU WIN!', 'The snake fills the whole board. Legendary!');
+}
+
+function startRun() { status = 'running'; hideOverlay(); updateHud(); schedule(); }
+function pauseGame() { if (status === 'running') { status = 'paused'; stopTimer(); showOverlay('Paused', 'Press P or an arrow key to resume.'); } }
+function resumeGame() { if (status === 'paused') { status = 'running'; hideOverlay(); updateHud(); schedule(); } }
+
+function schedule() {
+  clearTimeout(timer);
+  timer = setTimeout(tick, currentDelay());
+}
+function stopTimer() { clearTimeout(timer); timer = null; }
+
+function tick() {
+  if (status !== 'running') return;
+  step();
+  draw();
+  if (status === 'running') schedule();
+}
+
+function queueDir(d) {
+  if (!d) return;
+  var last = queue.length ? queue[queue.length - 1] : dir;
+  if ((d.x === last.x && d.y === last.y) || (d.x === -last.x && d.y === -last.y)) return; // same or reverse: ignore
+  if (queue.length < 2) queue.push(d);
+}
+
+function step() {
+  if (status !== 'running') return;
+  if (queue.length) dir = queue.shift();
+
+  var head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+  // wall collision -> game over
+  if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) { die('wall'); return; }
+
+  var eating = !!(food && food.x === head.x && food.y === head.y);
+
+  // self collision: when not growing the tail cell is vacated this tick, so it's safe to move into
+  var limit = eating ? snake.length : snake.length - 1;
+  for (var i = 0; i < limit; i++) {
+    if (snake[i].x === head.x && snake[i].y === head.y) { die('self'); return; }
+  }
+
+  snake.unshift(head);
+  if (eating) {
+    score++;
+    if (score > high) { high = score; saveHigh(high); }
+    var before = food;
+    spawnFood();
+    updateHud();
+    if (!food) win(); // board completely filled
+  } else {
+    snake.pop();
+  }
+}
+
+function draw() {
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // subtle checkerboard
+  for (var y = 0; y < ROWS; y++)
+    for (var x = 0; x < COLS; x++) {
+      if (((x + y) & 1) === 0) { ctx.fillStyle = '#131c31'; ctx.fillRect(x * CELL, y * CELL, CELL, CELL); }
+    }
+
+  // food (red apple with a stem)
+  if (food) {
+    var fx = food.x * CELL + CELL / 2, fy = food.y * CELL + CELL / 2;
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath();
+    ctx.arc(fx, fy + 1, CELL / 2 - 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#65a30b'; // wait — stem green should be brighter
+    ctx.strokeStyle = '#84cc16';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy - CELL / 2 + 3);
+    ctx.lineTo(fx + 2.5, fy - CELL / 2 - 0.5);
+    ctx.stroke();
+  }
+
+  // snake body (darker), head (brighter) on top
+  for (var i = snake.length - 1; i >= 1; i--) {
+    var s = snake[i];
+    ctx.fillStyle = '#22c55e';
+    ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+  }
+  if (snake.length) {
+    var h = snake[0];
+    ctx.fillStyle = '#4ade80';
+    ctx.fillRect(h.x * CELL, h.y * CELL, CELL, CELL);
+    // eyes facing current direction
+    var cx = h.x * CELL + CELL / 2, cy = h.y * CELL + CELL / 2;
+    ctx.fillStyle = '#0f172a';
+    if (dir.x !== 0) { // horizontal: eyes stacked vertically near the front edge
+      var ex = h.x * CELL + (dir.x > 0 ? CELL - 4.5 : 3);
+      ctx.fillRect(ex, cy - 4.5, 2.6, 2.6);
+      ctx.fillRect(ex, cy + 1.9, 2.6, 2.6);
+    } else if (dir.y !== 0) { // vertical: eyes side by side near the front edge
+      var ey = h.y * CELL + (dir.y > 0 ? CELL - 4.5 : 3);
+      ctx.fillRect(cx - 4.5, ey, 2.6, 2.6);
+      ctx.fillRect(cx + 1.9, ey, 2.6, 2.6);
+    } else { // unused guard: dir can never be (0,0) in practice
+    }
+  }
+}
+
+function onKeydown(e) {
+  var k = e.key;
+  if (k === 'ArrowUp' || k === 'ArrowDown' || k === 'ArrowLeft' || k === 'ArrowRight' || k === ' ') e.preventDefault();
+
+  var D = { ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 }, ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 } };
+  if (D[k]) {
+    if (status === 'ready') startRun();
+    else if (status === 'paused') resumeGame();
+    queueDir(D[k]);
+    return;
+  }
+  if ((k === 'p' || k === 'P')) {
+    if (status === 'running') pauseGame();
+    else if (status === 'paused') resumeGame();
+    return;
+  }
+  if (k === ' ' || k === 'Enter') {
+    if (status === 'ready') startRun();
+    else if (status === 'over' || status === 'won') { reset(); startRun(); }
+  }
+}
+
+document.addEventListener('keydown', onKeydown);
+
+// ------------------------------------------------------------------
+// Test hooks — only enabled with ?test=1 so normal play stays clean.
+var testMode = new URLSearchParams(location.search).get('test') === '1';
+if (testMode) {
+  window.__snake = {
+    key: function (name) { onKeydown({ key: name, preventDefault: function () {} }); },
+    tickManual: function () { stopTimer(); step(); draw(); if (status === 'running') schedule(); },
+    freeze: function () { stopTimer(); }, // test hook: kill any pending auto-timer so real time can't mutate state mid-suite
+    state: function () {
+      var head = snake[0];
+      var foodIsFree = true;
+      for (var i = 0; i < snake.length && food; i++) if (snake[i].x === food.x && snake[i].y === food.y) foodIsFree = false;
+      return { status: status, head: { x: head.x, y: head.y }, len: snake.length, score: score, high: high, dir: { x: dir.x, y: dir.y }, queueLen: queue.length, food: food ? { x: food.x, y: food.y } : null, foodNotOnSnake: !!foodIsFree };
+    },
+    setFood: function (x, y) { food = { x: x, y: y }; },
+    setSnake: function (cells) { snake = cells.map(function (c) { return { x: c[0], y: c[1] }; }); dir = { x: 1, y: 0 }; queue = []; },
+    resetTest: function () { stopTimer(); won = false; reset(); status = 'ready'; showOverlay('Ready', ''); draw(); }
+  };
+}
+
+reset();
+showOverlay('Classic Snake', 'Press any arrow key to start');
+draw();
+})();
+</script>
+</body>
+</html>
