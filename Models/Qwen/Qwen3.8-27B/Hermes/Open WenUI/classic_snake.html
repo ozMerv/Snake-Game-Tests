@@ -1,0 +1,235 @@
+
+
+                        <!DOCTYPE html>
+                        <html lang="en">
+                        <head>
+                            <meta charset="UTF-8">
+                            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+							<style>
+								body {
+									background-color: white; /* Ensure the iframe has a white background */
+								}
+
+								
+							</style>
+                        </head>
+                        <body>
+                            <!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Classic Snake</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+    background: #0b1216; font-family: "Courier New", monospace; color: #e5efe9; padding: 20px;
+  }
+  h1 { font-size: 34px; letter-spacing: .35em; color: #4ade80; text-shadow: 0 0 14px rgba(74,222,128,.45); }
+  .hud { display: flex; gap: 28px; font-size: 16px; }
+  .hud b { color: #4ade80; }
+  #wrap { position: relative; line-height: 0; }
+  #board { background: #0e1a17; border: 3px solid #1d3529; border-radius: 6px; box-shadow: 0 0 30px rgba(34,197,94,.12); display: block; }
+  #overlay { position: absolute; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgba(5,10,8,.72); border-radius: 6px; text-align: center; padding: 16px; }
+  #overlay.visible { display: flex; }
+  #ov-title { font-size: 26px; letter-spacing: .2em; color: #4ade80; line-height: 1.3; }
+  #ov-text { font-size: 14px; color: #c7d8cf; white-space: pre-line; line-height: 1.5; }
+  .foot { font-size: 12px; color: #5b6f66; text-align: center; }
+</style>
+</head>
+<body>
+<h1>SNAKE</h1>
+<div class="hud"><span>SCORE&nbsp;<b id="score">0</b></span><span>BEST&nbsp;<b id="best">0</b></span></div>
+<div id="wrap">
+  <canvas id="board" width="480" height="480"></canvas>
+  <div id="overlay"><h2 id="ov-title">SNAKE</h2><p id="ov-text">Press any arrow key to start</p></div>
+</div>
+<p class="foot">Arrows or WASD move &middot; P / Esc pause &middot; Enter restarts after game over &middot; Walls are lethal (classic rules)</p>
+
+<script>
+'use strict';
+
+/* Classic Snake — single file, no dependencies. 24x24 grid @ 20px cells = 480x480 canvas. */
+
+const COLS = 24, ROWS = 24, CELL = 20;
+const BASE_MS = 150, MIN_MS = 70, SPEEDUP_EVERY = 4, SPEED_STEP = 6; /* -6ms per 4 apples, capped at MIN_MS */
+const LS_KEY = 'classicSnakeBest';
+
+const canvas   = document.getElementById('board');
+const ctx      = canvas.getContext('2d');
+const scoreEl  = document.getElementById('score');
+const bestEl   = document.getElementById('best');
+const overlay  = document.getElementById('overlay');
+const ovTitle  = document.getElementById('ov-title');
+const ovText   = document.getElementById('ov-text');
+
+let snake, dir, pendingDirs, food;
+let score = 0, stepMs = BASE_MS;
+let state = 'ready';            /* ready | playing | paused | over */
+let won = false;                /* true if the game ended by filling every cell */
+let best = 0;
+
+try { best = parseInt(localStorage.getItem(LS_KEY), 10) || 0; } catch (e) { /* private browsing / blocked storage: play without persistence */ }
+
+function updateHud()    { scoreEl.textContent = String(score); bestEl.textContent = String(best); }
+function showOverlay(t, m) { ovTitle.textContent = t; ovText.textContent = m; overlay.classList.add('visible'); }
+function hideOverlay()  { overlay.classList.remove('visible'); }
+
+function saveBest() {
+  if (score > best) {
+    best = score;
+    try { localStorage.setItem(LS_KEY, String(best)); } catch (e) {}
+  }
+}
+
+/* FIX (review pass): spawn food ONLY on free cells — a naive Math.random cell can land under the snake and become uneatable. */
+function spawnFood() {
+  const occupied = new Set(snake.map(function (s) { return s.x + ',' + s.y; }));
+  const free = [];
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if (!occupied.has(x + ',' + y)) free.push({ x: x, y: y });
+  if (free.length === 0) { food = null; endGame(true); return false; } /* board full -> you win */
+  food = free[(Math.random() * free.length) | 0];
+  return true;
+}
+
+function resetGame() {
+  const cx = COLS >> 1, cy = ROWS >> 1;
+  snake = [{ x: cx, y: cy }, { x: cx - 1, y: cy }, { x: cx - 2, y: cy }]; /* head first */
+  dir = { x: 1, y: 0 };
+  pendingDirs = [];
+  score = 0; stepMs = BASE_MS; won = false; state = 'ready'; food = null;
+  spawnFood(); updateHud();
+  showOverlay('SNAKE', 'Press any arrow key to start\nP pauses · Enter restarts after game over');
+  draw();
+}
+
+function start() {
+  if (state !== 'ready') return;
+  state = 'playing'; hideOverlay(); lastTime = performance.now(); acc = 0;
+}
+
+function togglePause() {
+  if (state === 'playing')      { state = 'paused'; showOverlay('PAUSED', 'Press P to resume'); }
+  else if (state === 'paused')  { state = 'playing'; hideOverlay(); lastTime = performance.now(); acc = 0; }
+}
+
+function newRun() { resetGame(); start(); }
+
+function endGame(wonThis) {
+  won = wonThis; state = 'over';
+  saveBest(); updateHud(); draw();
+  showOverlay(won ? 'YOU WIN!' : 'GAME OVER', score + ' points — press Enter to play again');
+}
+
+/* FIX (review pass): buffer up to 3 queued turns and reject any that reverse into the previous heading, so a fast double-tap can't turn you back on yourself mid-second. */
+function pushDir(d) {
+  const last = pendingDirs.length ? pendingDirs[pendingDirs.length - 1] : dir;
+  if (d.x === last.x && d.y === last.y) return;   /* same heading: nothing to do */
+  if (d.x === -last.x && d.y === -last.y) return; /* reversal is illegal */
+  if (pendingDirs.length < 3) pendingDirs.push(d);
+}
+
+function step() {
+  if (pendingDirs.length) dir = pendingDirs.shift();
+  const head = snake[0], nx = head.x + dir.x, ny = head.y + dir.y;
+
+  if (nx < 0 || ny < 0 || nx >= COLS || ny >= ROWS) { endGame(false); return; } /* classic: walls kill */
+
+  const ate = food && nx === food.x && ny === food.y;
+  /* FIX (review pass): the tail cell vacates on this same tick UNLESS we grow, so only exclude it from collision when not eating — naive "check whole body" false-positives chasing your own tail. */
+  const checkTo = ate ? snake.length : snake.length - 1;
+  for (let i = 0; i < checkTo; i++) {
+    if (snake[i].x === nx && snake[i].y === ny) { endGame(false); return; }
+  }
+
+  snake.unshift({ x: nx, y: ny });
+  if (ate) {
+    score++; saveBest();
+    stepMs = Math.max(MIN_MS, BASE_MS - ((score / SPEEDUP_EVERY) | 0) * SPEED_STEP); /* gets faster as you eat */
+    spawnFood(); /* may endGame(true) on a full board */
+  } else {
+    snake.pop(); /* moved, tail vacates */
+  }
+  updateHud(); draw();
+}
+
+function draw() {
+  ctx.fillStyle = '#0e1a17';
+  ctx.fillRect(0, 0, COLS * CELL, ROWS * CELL);
+  ctx.fillStyle = 'rgba(74,222,128,0.045)'; /* subtle checkerboard */
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++)
+      if ((x + y) % 2 === 0) ctx.fillRect(x * CELL, y * CELL, CELL, CELL);
+
+  if (food) { /* apple: red circle at cell center */
+    const fx = food.x * CELL + CELL / 2, fy = food.y * CELL + CELL / 2;
+    ctx.fillStyle = '#ef4444';
+    ctx.beginPath(); ctx.arc(fx, fy, CELL * 0.36, 0, Math.PI * 2); ctx.fill();
+  }
+
+  for (let i = snake.length - 1; i >= 0; i--) { /* tail first so head renders on top */
+    const s = snake[i];
+    let color = '#22c55e';
+    if (i === 0) color = (state === 'over' && !won) ? '#f87171' : '#4ade80'; /* red head = crash */
+    ctx.fillStyle = color;
+    ctx.fillRect(s.x * CELL + 1, s.y * CELL + 1, CELL - 2, CELL - 2);
+  }
+}
+
+let lastTime = performance.now(), acc = 0;
+function loop(t) {
+  if (state === 'playing') {
+    const dt = Math.min(t - lastTime, 250); /* FIX (review pass): clamp big gaps (tab switched away) so we don't burst a dozen steps on return */
+    lastTime = t; acc += dt;
+    while (acc >= stepMs && state === 'playing') { acc -= stepMs; step(); }
+  } else {
+    lastTime = t;
+  }
+  requestAnimationFrame(loop);
+}
+
+const KEY_DIRS = {
+  ArrowUp: { x: 0, y: -1 }, KeyW: { x: 0, y: -1 },
+  ArrowDown: { x: 0, y: 1 }, KeyS: { x: 0, y: 1 },
+  ArrowLeft: { x: -1, y: 0 }, KeyA: { x: -1, y: 0 },
+  ArrowRight: { x: 1, y: 0 }, KeyD: { x: 1, y: 0 }
+};
+
+window.addEventListener('keydown', function (e) {
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].indexOf(e.code) !== -1) e.preventDefault(); /* keep arrows/space from scrolling the page */
+  if (e.repeat) return; /* held keys must not re-fire state changes or accidentally restart a game you just died in */
+
+  const d = KEY_DIRS[e.code];
+  if (d) {
+    if (state !== 'playing') {
+      if (state === 'over') newRun(); else if (state === 'paused') togglePause(); else start();
+    }
+    pushDir(d);
+    return;
+  }
+  if (e.code === 'KeyP' || e.code === 'Escape') { togglePause(); return; }
+  if (e.code === 'Enter' || e.code === 'Space') {
+    if (state === 'ready') start(); else if (state === 'over') newRun(); else if (state === 'paused') togglePause();
+  }
+});
+
+function autoPause() { /* FIX (review pass): pause when the window loses focus or the tab is hidden */
+  if (state === 'playing') togglePause();
+}
+window.addEventListener('blur', autoPause);
+document.addEventListener('visibilitychange', function () { if (document.hidden) autoPause(); });
+
+resetGame();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
+
+							<script>
+                            	
+							</script>
+                        </body>
+                        </html>
